@@ -1,12 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"flag"
 	"fmt"
+	"html/template"
 	"io"
 	"os"
 
 	"rsc.io/markdown"
+	"rsc.io/tmplfunc"
 )
 
 func main() {
@@ -19,21 +22,27 @@ func main() {
 func run() error {
 	in := flag.String("i", "", "input file")
 	out := flag.String("o", "", "output file")
+	tmpl := flag.String("t", "pages.tmpl", "template file")
 
 	flag.Parse()
 
 	var (
-		b   []byte
-		err error
+		b bytes.Buffer
 	)
 
-	if *in != "" {
-		b, err = os.ReadFile(os.Args[1])
-	} else {
-		b, err = io.ReadAll(os.Stdin)
+	t := template.New(*tmpl)
 
+	if err := tmplfunc.ParseFiles(t, *tmpl); err != nil {
+		return err
 	}
-	if err != nil {
+
+	tm := t.New(*in)
+
+	if err := tmplfunc.ParseFiles(tm, *in); err != nil {
+		return err
+	}
+
+	if err := tm.Execute(&b, nil); err != nil {
 		return err
 	}
 
@@ -50,15 +59,19 @@ func run() error {
 		SmartQuote:         true,
 	}
 
-	d := p.Parse(string(b))
+	d := p.Parse(b.String())
 
 	m := markdown.ToHTML(d)
 
+	var w io.Writer = os.Stdout
 	if *out != "" {
-		err = os.WriteFile(*out, []byte(m), 0666)
-	} else {
-		_, err = os.Stdout.Write([]byte(m))
+		f, err := os.Create(*out)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		w = f
 	}
 
-	return err
+	return t.Execute(w, map[string]any{"Content": template.HTML(m)})
 }
