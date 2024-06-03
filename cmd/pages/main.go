@@ -2,11 +2,14 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"html/template"
-	"io"
 	"os"
+	"path"
+
+	"gopkg.in/yaml.v3"
 
 	"rsc.io/markdown"
 	"rsc.io/tmplfunc"
@@ -20,58 +23,100 @@ func main() {
 }
 
 func run() error {
-	in := flag.String("i", "", "input file")
-	out := flag.String("o", "", "output file")
-	tmpl := flag.String("t", "pages.tmpl", "template file")
+	inputName := flag.String("input", "", "input filename")
+	outputName := flag.String("output", "", "output filename")
+	templateName := flag.String("template", "pages.tmpl", "template filename")
 
 	flag.Parse()
 
 	var (
-		b bytes.Buffer
+		buffer bytes.Buffer
 	)
 
-	t := template.New(*tmpl)
+	tmpl := template.New(*templateName)
 
-	if err := tmplfunc.ParseFiles(t, *tmpl); err != nil {
+	if err := tmplfunc.ParseFiles(tmpl, *templateName); err != nil {
 		return err
 	}
 
-	tm := t.New(*in)
-
-	if err := tmplfunc.ParseFiles(tm, *in); err != nil {
+	input, err := os.ReadFile(*inputName)
+	if err != nil {
 		return err
 	}
 
-	if err := tm.Execute(&b, nil); err != nil {
+	header, input := parseHeader(input)
+
+	tmplContent := tmpl.New(*inputName)
+
+	if err := tmplfunc.Parse(tmplContent, string(input)); err != nil {
 		return err
 	}
 
-	p := &markdown.Parser{
-		HeadingIDs:         true,
-		Strikethrough:      true,
-		TaskListItems:      true,
-		AutoLinkText:       true,
-		AutoLinkAssumeHTTP: true,
-		Table:              true,
-		Emoji:              true,
-		SmartDot:           true,
-		SmartDash:          true,
-		SmartQuote:         true,
+	if err := tmplContent.Execute(&buffer, map[string]any{"Header": header}); err != nil {
+		return err
 	}
 
-	d := p.Parse(b.String())
+	content := buffer.String()
 
-	m := markdown.ToHTML(d)
-
-	var w io.Writer = os.Stdout
-	if *out != "" {
-		f, err := os.Create(*out)
-		if err != nil {
-			return err
+	if path.Ext(*inputName) == ".md" {
+		parser := &markdown.Parser{
+			HeadingIDs:         true,
+			Strikethrough:      true,
+			TaskListItems:      true,
+			AutoLinkText:       true,
+			AutoLinkAssumeHTTP: true,
+			Table:              true,
+			Emoji:              true,
+			SmartDot:           true,
+			SmartDash:          true,
+			SmartQuote:         true,
 		}
-		defer f.Close()
-		w = f
+
+		document := parser.Parse(content)
+
+		content = markdown.ToHTML(document)
 	}
 
-	return t.Execute(w, map[string]any{"Content": template.HTML(m)})
+	buffer.Reset()
+
+	if err := tmpl.Execute(&buffer, map[string]any{"Header": header, "Content": template.HTML(content)}); err != nil {
+		return err
+	}
+
+	return os.WriteFile(*outputName, buffer.Bytes(), 0666)
+}
+
+var (
+	jsonStart = []byte("<!--{")
+	jsonEnd   = []byte("}-->")
+	yamlStart = []byte("---\n")
+	yamlEnd   = []byte("\n---\n")
+)
+
+func parseHeader(b []byte) (map[string]any, []byte) {
+	switch {
+	case bytes.HasPrefix(b, jsonStart):
+		header := make(map[string]any)
+		end := bytes.Index(b, jsonEnd)
+
+		if end < 0 {
+			return header, b
+		}
+
+		json.Unmarshal(b[len(jsonEnd)-1:end+1], &header)
+
+		return header, b[end+len(jsonEnd):]
+	case bytes.HasPrefix(b, yamlStart):
+		header := make(map[string]any)
+		end := bytes.Index(b, yamlEnd)
+		if end < 0 {
+			return header, b
+		}
+
+		yaml.Unmarshal(b[len(yamlStart):end+1], &header)
+
+		return header, b[end+len(yamlEnd):]
+	}
+
+	return nil, b
 }
